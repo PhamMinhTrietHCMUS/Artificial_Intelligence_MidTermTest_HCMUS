@@ -2,7 +2,6 @@ import pygame as pg
 import time
 import numpy
 import copy
-from queue import PriorityQueue
 from collections import deque
 import random
 import psutil
@@ -54,39 +53,11 @@ BACKGROUND = [
 mainScreen = None
 clock = None
 
-class MemoryTracker:
-    def __init__(self):
-        self.process = psutil.Process(os.getpid())
-        self.start_memory = 0
-        self.peak_memory = 0
-        self.current_memory = 0
-    
-    def start_tracking(self):
-        """Start memory tracking"""
-        self.start_memory = self.process.memory_info().rss / 1024  # KB
-        self.peak_memory = self.start_memory
-        self.current_memory = self.start_memory
-    
-    def update(self):
-        """Update current memory usage"""
-        self.current_memory = self.process.memory_info().rss / 1024  # KB
-        if self.current_memory > self.peak_memory:
-            self.peak_memory = self.current_memory
-    
-    def get_usage(self):
-        """Get memory usage statistics"""
-        self.update()
-        return {
-            'current': self.current_memory,
-            'peak': self.peak_memory,
-            'used': self.current_memory - self.start_memory,
-            'peak_used': self.peak_memory - self.start_memory
-        }
-    
-    def get_formatted_usage(self):
-        """Get formatted memory usage string"""
-        usage = self.get_usage()
-        return f"Memory: {usage['used']:.1f}KB (Peak: {usage['peak_used']:.1f}KB)"
+def get_memory_usage_kb():
+    """Get current memory usage in KB"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    return memory_info.rss / 1024  # Convert bytes to KB
 
 
 class Button:
@@ -233,59 +204,8 @@ class Vehicles:
         self.list: numpy.ndarray = numpy.array(vehiclesList, dtype= int)
         self.cost: int = 0
         self.parent: int = -1
-        self.heuristic: float = 0
 
-    def finalOptimalHeuristic(self) -> float:
-        """
-        Heuristic tối ưu cuối cùng - OPTIMIZED VERSION
-        Tạo map matrix một lần thay vì dùng Map2D object
-        """
-        # Tạo map matrix hiệu quả hơn
-        map_matrix = [[0 for _ in range(MAPSIZE)] for _ in range(MAPSIZE)]
-        for i, vehicle in enumerate(self.list):
-            if vehicle[0] == 0:  # Horizontal
-                for j in range(vehicle[1], vehicle[3] + 1):
-                    map_matrix[vehicle[2]][j] = i + 1
-            else:  # Vertical
-                for j in range(vehicle[2], vehicle[4] + 1):
-                    map_matrix[j][vehicle[1]] = i + 1
-        
-        # 1. Khoảng cách cơ bản đến đích
-        distance_to_goal = WINX - self.list[0][3]
-        if distance_to_goal <= 0:
-            return 0
-        
-        heuristic_value = distance_to_goal
-        
-        # 2. Phân tích xe chặn đường
-        blocking_cost = 0
-        red_row = 2  # Hàng của xe đỏ
-        
-        for i in range(self.list[0][3] + 1, MAPSIZE):
-            if map_matrix[red_row][i] != 0:
-                blocking_vehicle_id = map_matrix[red_row][i] - 1
-                blocking_vehicle = self.list[blocking_vehicle_id]
-                
-                if blocking_vehicle[4] - blocking_vehicle[2] == 2:  # Xe dài 3 ô
-                    blocking_cost += (MAPSIZE - 1 - blocking_vehicle[4]) * 2.5
-                else:
-                    blocking_cost += 1.5
-                
-                # Thêm cascade cost cho xe dọc
-                if blocking_vehicle[0] == 1:  # Xe dọc
-                    for j in range(blocking_vehicle[2], blocking_vehicle[4] + 1):
-                        for k in range(MAPSIZE):
-                            if (k != i and map_matrix[j][k] != 0 and 
-                                map_matrix[j][k] != blocking_vehicle_id + 1):
-                                blocking_cost += 0.5
-        
-        # 3. Bonus cho không gian trống gần xe đỏ
-        space_bonus = 0
-        for col in range(self.list[0][3] + 1, min(self.list[0][3] + 3, MAPSIZE)):
-            if map_matrix[red_row][col] == 0:
-                space_bonus += 0.1
-        
-        return heuristic_value + blocking_cost - space_bonus
+
 
     def moveVehicle(self, index: int, value: bool) -> 'Vehicles':
         '''Di chuyển xe thứ index trong list - OPTIMIZED VERSION\n
@@ -384,23 +304,18 @@ class Vehicles:
         return False
     
     def __lt__(self, value: 'Vehicles') -> bool:
-        return self.cost + self.heuristic < value.cost + value.heuristic 
+        return self.cost < value.cost
 
 class SearchAlgorithm:
     def __init__(self, vehicles: Vehicles):
         self.currentAlgorithm: function = None
         self.startMap: Vehicles = vehicles
         self.show_progress = True
-        self.memory_tracker = None
     
-    def show_algorithm_progress(self, algorithm_name: str, explored_count: int, frontier_count: int, current_state: Vehicles = None):
+    def show_algorithm_progress(self, algorithm_name: str, explored_count: int, frontier_count: int, current_state: Vehicles = None, current_memory: float = 0.0, peak_memory: float = 0.0):
         """Hiển thị tiến trình thuật toán real-time - OPTIMIZED VERSION"""
         if not self.show_progress:
             return
-            
-        # Update memory tracking if available
-        if self.memory_tracker:
-            self.memory_tracker.update()
             
         # Giảm delay để tăng tốc
         pg.time.delay(10)  # Giảm từ 50ms xuống 10ms
@@ -433,26 +348,26 @@ class SearchAlgorithm:
             f"Exploring nodes...",
             f"Explored: {explored_count}",
             f"Frontier: {frontier_count}",
-            f"Total: {explored_count + frontier_count}"
+            f"Total: {explored_count + frontier_count}",
+            f"Memory: {current_memory:.2f} KB",
+            f"Peak Memory: {peak_memory:.2f} KB"
         ]
-        
-        # Add memory usage to progress display
-        if self.memory_tracker:
-            memory_usage = self.memory_tracker.get_usage()
-            stats_text.append(f"Memory: {memory_usage['used']:.1f}KB")
         
         if current_state:
             stats_text.append(f"Current cost: {current_state.cost}")
-            if hasattr(current_state, 'heuristic'):
-                stats_text.append(f"Heuristic: {current_state.heuristic:.1f}")
         
         for i, text in enumerate(stats_text):
-            text_surface = stats_font.render(text, True, (255, 255, 255))
+            # Color memory stats differently
+            if "Memory" in text:
+                color = (255, 255, 0)  # Yellow for memory stats
+            else:
+                color = (255, 255, 255)  # White for other stats
+            text_surface = stats_font.render(text, True, color)
             mainScreen.blit(text_surface, (620, 150 + i * 35))
         
         pg.display.update()
 
-    def BFS(self) -> tuple[list[Vehicles], int]:
+    def BFS(self) -> tuple[list[Vehicles], int, float]:
         f: deque[Vehicles] = deque()
         e: list[Vehicles] = []
         visited_hashes = set()  # Sử dụng hash set thay vì checkVisited
@@ -460,20 +375,31 @@ class SearchAlgorithm:
         visited_hashes.add(self.startMap.get_state_hash())
         iteration_count: int = 0
         
+        # Track memory usage
+        start_memory = get_memory_usage_kb()
+        max_memory = start_memory
+        
         while(len(f) > 0):
             curr: Vehicles = f.popleft()
             e.append(curr)
             
+            # Track peak memory usage
+            current_memory = get_memory_usage_kb()
+            max_memory = max(max_memory, current_memory)
+            memory_used = current_memory - start_memory
+            peak_memory_used = max_memory - start_memory
+            
             # Show progress every 20 iterations để giảm overhead
             iteration_count += 1
             if self.show_progress and (iteration_count % 20 == 0 or curr.winCondition()):
-                self.show_algorithm_progress("BFS", len(e), len(f), curr)
+                self.show_algorithm_progress("BFS", len(e), len(f), curr, memory_used, peak_memory_used)
             
             if curr.winCondition():
                 if self.show_progress:
-                    self.show_algorithm_progress("BFS", len(e), len(f), curr)
+                    self.show_algorithm_progress("BFS", len(e), len(f), curr, memory_used, peak_memory_used)
                     pg.time.delay(1000)
-                return e, len(f) + len(e)
+                memory_used = max_memory - start_memory
+                return e, len(f) + len(e), memory_used
             
             for i in curr.validMovements():
                 tmp: Vehicles = curr.moveVehicle(i[0], i[1])
@@ -481,9 +407,11 @@ class SearchAlgorithm:
                 tmp.parent = len(e) - 1
                 if not tmp.checkVisitedOptimized(visited_hashes):
                     f.append(tmp)
-        return []
+        
+        memory_used = max_memory - start_memory
+        return [], 0, memory_used
     
-    def DFS(self) -> tuple[list[Vehicles], int]:
+    def DFS(self) -> tuple[list[Vehicles], int, float]:
         f: deque[Vehicles] = deque()
         e: list[Vehicles] = []
         visited_hashes = set()  # Sử dụng hash set
@@ -491,20 +419,31 @@ class SearchAlgorithm:
         visited_hashes.add(self.startMap.get_state_hash())
         iteration_count: int = 0
         
+        # Track memory usage
+        start_memory = get_memory_usage_kb()
+        max_memory = start_memory
+        
         while(len(f) > 0):
             curr: Vehicles = f.pop()
             e.append(curr)
             
+            # Track peak memory usage
+            current_memory = get_memory_usage_kb()
+            max_memory = max(max_memory, current_memory)
+            memory_used = current_memory - start_memory
+            peak_memory_used = max_memory - start_memory
+            
             # Show progress every 20 iterations để giảm overhead
             iteration_count += 1
             if self.show_progress and (iteration_count % 20 == 0 or curr.winCondition()):
-                self.show_algorithm_progress("DFS", len(e), len(f), curr)
+                self.show_algorithm_progress("DFS", len(e), len(f), curr, memory_used, peak_memory_used)
             
             if curr.winCondition():
                 if self.show_progress:
-                    self.show_algorithm_progress("DFS", len(e), len(f), curr)
+                    self.show_algorithm_progress("DFS", len(e), len(f), curr, memory_used, peak_memory_used)
                     pg.time.delay(1000)
-                return e, len(f) + len(e)
+                memory_used = max_memory - start_memory
+                return e, len(f) + len(e), memory_used
             
             for i in curr.validMovements():
                 tmp: Vehicles = curr.moveVehicle(i[0], i[1])
@@ -512,103 +451,54 @@ class SearchAlgorithm:
                 tmp.parent = len(e) - 1
                 if not tmp.checkVisitedOptimized(visited_hashes):
                     f.append(tmp)
-        return []
+        
+        memory_used = max_memory - start_memory
+        return [], 0, memory_used
     
-
-
-    def AStar(self) -> tuple[list[Vehicles], int]:
-        """A* sử dụng priority queue và hash set cho hiệu suất tối ưu"""
-        frontier: PriorityQueue = PriorityQueue()
-        explored = []
-        visited_hashes = set()
-        iteration_count = 0
-        counter = 0  # Để break ties trong priority queue
-        
-        # Thêm start state
-        self.startMap.heuristic = self.startMap.finalOptimalHeuristic()
-        frontier.put((self.startMap.cost + self.startMap.heuristic, counter, self.startMap))
+    def UCS(self) -> tuple[list[Vehicles], int, float]:
+        f: deque[Vehicles] = deque()
+        e: list[Vehicles] = []
+        visited_hashes = set()  # Sử dụng hash set
+        f.append(self.startMap)
         visited_hashes.add(self.startMap.get_state_hash())
-        counter += 1
+        iteration_count: int = 0
         
-        while not frontier.empty():
-            curr: Vehicles
-            _, _, curr = frontier.get()
-            explored.append(curr)
+        # Track memory usage
+        start_memory = get_memory_usage_kb()
+        max_memory = start_memory
+        
+        while(len(f) > 0):
+            f = deque(sorted(f, key=lambda p: p.cost))  # Sort by cost only
+            curr: Vehicles = f.popleft()
+            e.append(curr)
             
-            # Giảm tần suất hiển thị progress để tăng tốc
+            # Track peak memory usage
+            current_memory = get_memory_usage_kb()
+            max_memory = max(max_memory, current_memory)
+            memory_used = current_memory - start_memory
+            peak_memory_used = max_memory - start_memory
+                
+            # Show progress every 10 iterations để giảm overhead
             iteration_count += 1
-            if self.show_progress and (iteration_count % 20 == 0 or curr.winCondition()):
-                self.show_algorithm_progress("A*", len(explored), frontier.qsize(), curr)
+            if self.show_progress and (iteration_count % 10 == 0 or curr.winCondition()):
+                self.show_algorithm_progress("UCS", len(e), len(f), curr, memory_used, peak_memory_used)
             
             if curr.winCondition():
                 if self.show_progress:
-                    self.show_algorithm_progress("A*", len(explored), frontier.qsize(), curr)
+                    self.show_algorithm_progress("UCS", len(e), len(f), curr, memory_used, peak_memory_used)
                     pg.time.delay(1000)
-                return explored, len(frontier) + len(explored)
-            
-            # Expand current node
-            for move in curr.validMovements():
-                child = curr.moveVehicle(move[0], move[1])
-                child.cost = curr.cost + max(
-                    child.list[move[0]][3] - child.list[move[0]][1],
-                    child.list[move[0]][4] - child.list[move[0]][2]
-                ) + 1
-                child.heuristic = child.finalOptimalHeuristic()
-                child.parent = len(explored) - 1
+                memory_used = max_memory - start_memory
+                return e, len(f) + len(e), memory_used
                 
-                # Check if state already visited using hash
-                if not child.checkVisitedOptimized(visited_hashes):
-                    frontier.put((child.cost + child.heuristic, counter, child))
-                    counter += 1
+            for i in curr.validMovements():
+                tmp: Vehicles = curr.moveVehicle(i[0], i[1])
+                tmp.cost = curr.cost + max(tmp.list[i[0]][3] - tmp.list[i[0]][1], tmp.list[i[0]][4] - tmp.list[i[0]][2]) + 1
+                tmp.parent = len(e) - 1
+                if not tmp.checkVisitedOptimized(visited_hashes):
+                    f.append(tmp)
         
-        return []
-
-    def AStarOptimized(self) -> tuple[list[Vehicles], int]:
-        """A* tối ưu - sử dụng PriorityQueue và hash set cho hiệu suất cao nhất"""
-        frontier: PriorityQueue = PriorityQueue()
-        explored: list = []
-        visited_hashes = set()
-        iteration_count = 0
-        counter = 0  # Để break ties trong priority queue
-        
-        # Thêm start state
-        self.startMap.heuristic = self.startMap.finalOptimalHeuristic()
-        frontier.put((self.startMap.cost + self.startMap.heuristic, counter, self.startMap))
-        visited_hashes.add(self.startMap.get_state_hash())
-        counter += 1
-        
-        while not frontier.empty():
-            curr: Vehicles
-            _, _, curr = frontier.get()
-            explored.append(curr)
-            
-            # Giảm tần suất hiển thị progress để tăng tốc tối đa
-            iteration_count += 1
-            if self.show_progress and (iteration_count % 50 == 0 or curr.winCondition()):
-                self.show_algorithm_progress("A* Optimized", len(explored), frontier.qsize(), curr)
-            
-            if curr.winCondition():
-                if self.show_progress:
-                    self.show_algorithm_progress("A* Optimized", len(explored), frontier.qsize(), curr)
-                    pg.time.delay(1000)
-                return explored, len(explored) + frontier.qsize()
-            
-            # Expand current node
-            for move in curr.validMovements():
-                child = curr.moveVehicle(move[0], move[1])
-                child.cost = curr.cost + max(
-                    child.list[move[0]][3] - child.list[move[0]][1],
-                    child.list[move[0]][4] - child.list[move[0]][2]
-                ) + 1
-                child.heuristic = child.finalOptimalHeuristic()
-                child.parent = len(explored) - 1
-                
-                # Check if state already visited using hash
-                if not child.checkVisitedOptimized(visited_hashes):
-                    frontier.put((child.cost + child.heuristic, counter, child))
-                    counter += 1
-        
-        return []
+        memory_used = max_memory - start_memory
+        return [], 0, memory_used
 
 def main():
     global mainScreen, clock
@@ -655,8 +545,8 @@ def main():
 
     # Các nút chọn thuật toán
     algo_bfs_button = Button(620, 150, 360, 50, "BFS", 32)
-    algo_dfs_button = Button(620, 220, 360, 50, "DFS", 32)
-    algo_astar_button = Button(620, 290, 360, 50, "A*", 32)
+    algo_ucs_button = Button(620, 220, 360, 50, "UCS", 32)
+    algo_dfs_button = Button(620, 290, 360, 50, "DFS", 32)
     
     # Bật/tắt hiển thị tiến trình
     show_progress_button = Button(620, 430, 200, 40, "Show Progress: ON", 28)
@@ -687,8 +577,8 @@ def main():
                                                                     map_next_button, map_prev_button, map_choose_button, map_exit_button)
                 
             elif current_state == CHOOSE_ALGORITHM:
-                current_state, selected_algorithm, show_progress = handle_choose_algorithm(mainScreen, algo_bfs_button, 
-                                                                           algo_dfs_button, algo_astar_button, show_progress_button, show_progress)
+                current_state, selected_algorithm, show_progress = handle_choose_algorithm(mainScreen, algo_bfs_button, algo_ucs_button, 
+                                                                           algo_dfs_button, show_progress_button, show_progress)
                 
             elif current_state == ALGORITHM_INFO:
                 current_state, algorithm_result = handle_algorithm_info(mainScreen, selected_algorithm, map_configs[current_map_index], show_progress)
@@ -715,8 +605,8 @@ def main():
                 text_surface = font.render("CHOOSE ALGORITHM", True, (255, 255, 255))
                 mainScreen.blit(text_surface, (620, 100))
                 algo_bfs_button.draw(mainScreen)
+                algo_ucs_button.draw(mainScreen)
                 algo_dfs_button.draw(mainScreen)
-                algo_astar_button.draw(mainScreen)
                 show_progress_button.draw(mainScreen)
         
         if previous_state != current_state:
@@ -733,8 +623,8 @@ def main():
             
             # Reset algorithm buttons
             algo_bfs_button.reset()
+            algo_ucs_button.reset()
             algo_dfs_button.reset()
-            algo_astar_button.reset()
             show_progress_button.reset()
         
         # Vẽ map
@@ -782,7 +672,7 @@ def handle_choose_map(screen, map_index, map_configs, next_button, prev_button, 
     
     return new_state, new_index
 
-def handle_choose_algorithm(screen, bfs_button, dfs_button, astar_button, show_progress_button, show_progress):
+def handle_choose_algorithm(screen, bfs_button, ucs_button, dfs_button, show_progress_button, show_progress):
     """Xử lý choose algorithm state"""
     font = pg.font.Font(None, 36)
     text_surface = font.render("CHOOSE ALGORITHM", True, (255, 255, 255))
@@ -797,10 +687,10 @@ def handle_choose_algorithm(screen, bfs_button, dfs_button, astar_button, show_p
     
     if bfs_button.draw(screen):
         return ALGORITHM_INFO, "BFS", new_show_progress
+    if ucs_button.draw(screen):
+        return ALGORITHM_INFO, "UCS", new_show_progress
     if dfs_button.draw(screen):
         return ALGORITHM_INFO, "DFS", new_show_progress
-    if astar_button.draw(screen):
-        return ALGORITHM_INFO, "A*", new_show_progress
     if show_progress_button.draw(screen):
         new_show_progress = not show_progress
     
@@ -819,33 +709,27 @@ def handle_algorithm_info(screen, algorithm, map_config, show_progress):
     
     pg.display.update()
     
-    # Initialize memory tracking
-    memory_tracker = MemoryTracker()
-    memory_tracker.start_tracking()
-    
     # Chạy thuật toán
     starting_map = Vehicles(map_config)
     search_algo = SearchAlgorithm(starting_map)
     search_algo.show_progress = show_progress  # Set the show_progress flag
-    search_algo.memory_tracker = memory_tracker  # Pass memory tracker to search algorithm
     
     # Hiển thị thông tin thuật toán
     start_time = pg.time.get_ticks()
     
     if algorithm == "BFS":
-        result, total_nodes = search_algo.BFS()
+        result, total_nodes, memory_used = search_algo.BFS()
     elif algorithm == "DFS":
-        result, total_nodes = search_algo.DFS()
-    elif algorithm == "A*":
-        result, total_nodes = search_algo.AStarOptimized() 
+        result, total_nodes, memory_used = search_algo.DFS()
+    elif algorithm == "UCS":
+        result, total_nodes, memory_used = search_algo.UCS()
     else:
         result = []
+        total_nodes = 0
+        memory_used = 0.0
     
     end_time = pg.time.get_ticks()
     execution_time = end_time - start_time
-    
-    # Get final memory statistics
-    memory_stats = memory_tracker.get_usage()
     
     # Xóa màn hình và hiện thị kết quả
     mainScreen.fill((0, 0, 0))
@@ -875,15 +759,12 @@ def handle_algorithm_info(screen, algorithm, map_config, show_progress):
     if result:
         # total_nodes = len(result)
         final_cost = result[-1].cost if result else 0
-        final_heuristic = result[-1].heuristic if result else 0
         
         stats_text = [
             f"Total nodes: {total_nodes}",
             f"Cost: {final_cost}",
-            f"Heuristic: {final_heuristic:.1f}",
+            f"Memory: {memory_used:.2f} KB",
             f"Time: {execution_time}ms",
-            f"Memory: {memory_stats['used']:.1f}KB",
-            f"Peak Memory: {memory_stats['peak_used']:.1f}KB",
             f"Status: Solution found!"
         ]
         text_color = (0, 255, 0)  # Green for success
@@ -891,10 +772,8 @@ def handle_algorithm_info(screen, algorithm, map_config, show_progress):
         stats_text = [
             "Total nodes: 0",
             "Cost: N/A",
-            "Heuristic: N/A",
+            f"Memory: {memory_used:.2f} KB",
             f"Time: {execution_time}ms",
-            f"Memory: {memory_stats['used']:.1f}KB",
-            f"Peak Memory: {memory_stats['peak_used']:.1f}KB",
             "Status: No solution found!"
         ]
         text_color = (255, 0, 0)  # Red for failure
